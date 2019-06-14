@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+
+set -e
+set -u
+set -o pipefail
+shopt -s nullglob
+
+errorExit() {
+    echo "$@" 1>&2
+    exit 1
+}
+
+
+MSMTP_CONFIG="${MSMTP_CONFIG:-}"
+MAILQUEUE_DIR="${MAILQUEUE_DIR:-${HOME:-}/.msmtp-mailqueue}"
+MAILQUEUE_FLUSH_TIMEOUT=${MAILQUEUE_FLUSH_TIMEOUT:-120}
+
+GPG_ENCRYPT_KEYS="${GPG_ENCRYPT_KEYS:-}"
+
+[ -e "$MSMTP_CONFIG" ] || errorExit "msmtp config is not configured. Please set MSMTP_CONFIG to the location of the msmtp config file"
+[ -d "$MAILQUEUE_DIR" ] || {
+    echo "mailqueue dir does not exist. Nothing to do yet."
+    exit 0
+}
+
+main() {
+    for mail in "$MAILQUEUE_DIR"/*.mail/; do
+        id="$(basename "$mail")"
+        prefix="mail [ $id ]"
+        if [[ ! -r "$mail/msmtp_flags" ]]; then
+            echo "$prefix failed to send message; missing flags" 1>&2
+            continue
+        fi
+        if [[ ! -r "$mail/message" ]]; then
+            echo "$prefix failed to send message; missing message" 1>&2
+            continue
+        fi
+
+        if [[ ! -w "$mail" ]]; then
+            echo "$prefix failed to send message; insufficient privileges" 1>&2
+            continue
+        fi
+
+        prefix="$prefix [ $(xargs -0 -a "$mail/msmtp_flags" printf '%s ')]"
+
+        if [[ -n "$GPG_ENCRYPT_KEYS" ]]; then
+            echo "Subject: New mail from $(hostname -f)" > "$mail/message.encrypted"
+            echo "" >> "$mail/message.encrypted"
+            gpg -e -a --recipient-file "${GPG_ENCRYPT_KEYS/ / --recipient-file }" -o - "$mail/message" >> "$mail/message.encrypted" || errorExit "$prefix failed to encrypt message"
+        fi
+
+        local mailfile="$mail/message"
+        if [[ -n "$GPG_ENCRYPT_KEYS" ]]; then
+            mailfile="$mail/message.encrypted"
+        fi
+        [[ -e "$mailfile" ]] || errorExit "$prefix mail file $mailFile does not exist"
+
+        echo "$prefix sending"
+        xargs -0 -a "$mail/msmtp_flags" msmtp -C "$MSMTP_CONFIG" -X - < "$mailfile"
+        ret="$?"
+        if [[ ! "$ret" -eq 0 ]] ; then
+            echo "$prefix faild to send; msmtp rc = $ret" 1>&2
+            continue
+        fi
+        if ! rm -rf "$mail"; then
+            echo "$prefix sent but not purged from queue"
+        fi
+    done
+}
+
+(
+  # Subshell
+  flock -w "$MAILQUEUE_FLUSH_TIMEOUT" -x 113 || errorExit "Failed to acquire lock"
+  main
+
+) 113>"$MAILQUEUE_DIR/.lock"

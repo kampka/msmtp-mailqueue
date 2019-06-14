@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+
+set -e
+set -u
+set -o pipefail
+
+errorExit() {
+    echo "$@" 1>&2
+    exit 1
+}
+
+MAILQUEUE_DIR="${MAILQUEUE_DIR:-${HOME:-}/.msmtp-mailqueue}"
+
+[ "$MAILQUEUE_DIR" = "/.msmtp-mailqueue" ] && errorExit "mailqueue directory is not configured. Either MAILQUEUE_DIR or HOME must be set in the environment"
+
+[ -d "$MAILQUEUE_DIR" ] || mkdir -m0700 -p "$MAILQUEUE_DIR" || errorExit "Failed to create mail queue directory at $MAILQUEUE_DIR"
+
+[ -w "$MAILQUEUE_DIR" ] || errorExit "Insufficient privileges to write to mailqueue dir at $MAILQUEUE_DIR"
+
+TEMP_DIR=$(mktemp -d "$MAILQUEUE_DIR/.tmpXXXXXXXXXX")
+
+cleanup() {
+    rm -rf "$TEMP_DIR"
+}
+trap cleanup EXIT
+
+printf '%s\0' "$@" > "$TEMP_DIR/msmtp_flags"
+cat > "$TEMP_DIR/message"
+
+RETRY=0
+while [[ -d "$TEMP_DIR" ]]; do
+    MESSAGE_DIR="$(date +"$(hostname -f)-%Y-%m-%d-%H.%M.%S.%N-P$$.mail")"
+    # Atomic rename.
+    mv -n -T "$TEMP_DIR" "$MAILQUEUE_DIR/$MESSAGE_DIR" || RETRY=$((RETRY + 1))
+    [ "$RETRY" -lt 3 ] || errorExit "Failed to store message in mail queue"
+done
